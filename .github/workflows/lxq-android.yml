@@ -1,0 +1,84 @@
+name: Build LXQ Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'lxq-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout LXQ source and mihomo submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "ndk;29.0.14206865" "cmake;3.22.1"
+          yes | sdkmanager --licenses
+
+      - name: Set up Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
+
+      - name: Apply upstream Go patches required by this source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$(go env GOROOT)"
+          shopt -s nullglob
+          for patch_file in "$GITHUB_WORKSPACE"/.github/patch/*.patch; do
+            patch --forward --batch -p 1 < "$patch_file"
+          done
+
+      - name: Restore mihomo source omitted by the uploaded ZIP
+        run: |
+          set -euo pipefail
+          CORE_DIR=core/src/foss/golang/clash
+          if [ ! -f "$CORE_DIR/go.mod" ]; then
+            mkdir -p "$(dirname "$CORE_DIR")"
+            git clone --depth 1 --branch Alpha https://github.com/MetaCubeX/mihomo.git "$CORE_DIR"
+          fi
+          test -f "$CORE_DIR/go.mod"
+          git -C "$CORE_DIR" rev-parse --short HEAD
+
+      - name: Build standard and legacy APKs
+        env:
+          LXQ_UPDATE_REPOSITORY: ${{ vars.LXQ_UPDATE_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/standard dist/legacy
+          if [ -n "$LXQ_UPDATE_REPOSITORY" ]; then
+            printf 'lxq.update.repository=%s\n' "$LXQ_UPDATE_REPOSITORY" > local.properties
+          fi
+          chmod +x ./gradlew
+          ./gradlew --no-daemon app:assembleAlphaRelease
+          cp app/build/outputs/apk/alpha/release/*.apk dist/standard/
+          ./gradlew --no-daemon app:assembleAlphaRelease -PtuxundlLegacy
+          cp app/build/outputs/apk/alpha/release/*.apk dist/legacy/
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LXQ-Android-APKs
+          path: dist/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
